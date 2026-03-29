@@ -1,6 +1,14 @@
 # Promptos Architecture
 
-> How I built a multi-engine AI prompt system that powers 80+ content generation modules — from zero to production.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5-blue.svg)](https://www.typescriptlang.org/)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black.svg)](https://nextjs.org/)
+[![LLM Providers](https://img.shields.io/badge/LLM_Providers-DeepSeek%20%7C%20Gemini-orange.svg)](#2-llm-provider-abstraction)
+[![Modules](https://img.shields.io/badge/Prompt_Modules-80%2B-purple.svg)](#4-module-system-design)
+
+> **A production-grade multi-engine AI prompt orchestration architecture** that powers 80+ content generation modules — from zero to production.
+
+**Promptos** is an open-source prompt orchestration system and multi-LLM management framework designed for building scalable AI content generation platforms. It provides a pluggable architecture for managing multiple LLM providers, structured prompt templates, and modular AI engines.
 
 [中文版本](#中文版本) | [English Version](#overview)
 
@@ -8,21 +16,21 @@
 
 ## Overview
 
-**Promptos** is the AI engine behind [FuYouAI](https://fuyouai.com) — a structured content generation platform. This repository documents the architecture, design decisions, and lessons learned from building a production prompt orchestration system.
+**Promptos** is the AI engine behind [FuYouAI](https://fuyouai.com) — a structured AI content generation platform. This repository documents the architecture, design decisions, and lessons learned from building a production prompt orchestration system with multi-LLM support.
 
 ### What This Repo Covers
 
-- **Multi-Engine Architecture** — How to design a system that supports multiple LLM providers (DeepSeek, Gemini, and more)
-- **5 Core AI Engines** — Task Breakdown, CoT Reasoning, Content Builder, Analytical Engine, Task Tree
-- **Module System** — How to organize and manage 80+ prompt modules at scale
-- **Prompt Resolution** — Flexible key resolution with multiple naming conventions and fallbacks
-- **Production Patterns** — Error handling, validation, feature flags, and observability
+- **Multi-LLM Provider Architecture** — How to design a pluggable system that supports multiple LLM providers (DeepSeek, Gemini, Claude, GPT-4, and more)
+- **5 Core AI Engines** — Task Breakdown, Chain-of-Thought Reasoning, Content Builder, Analytical Engine, Task Tree
+- **Prompt Module System** — How to organize and manage 80+ prompt modules at scale with automatic code generation
+- **Prompt Resolution & Routing** — Flexible key resolution with multiple naming conventions and fallback strategies
+- **Production Patterns** — Error handling, validation, feature flags, observability, and timing-safe authentication
 
 ### Who Is This For
 
-- Developers building AI-powered applications
-- Teams designing prompt management systems
-- Anyone interested in production AI architecture
+- Developers building AI-powered applications who need a prompt management framework
+- Teams designing prompt orchestration systems for multi-LLM environments
+- Anyone interested in production AI architecture and prompt engineering at scale
 
 ---
 
@@ -655,8 +663,8 @@ npm run gen:prompt-bank
 
 ## Related
 
-- [FuYouAI](https://fuyouai.com) — The production application powered by this architecture
-- [promptos-starter](https://github.com/fysd032/promptos-starter) — Starter template based on this architecture
+- [FuYouAI](https://fuyouai.com) — The production AI content generation platform powered by this architecture
+- [promptos-starter](https://github.com/eiragu/promptos-starter) — Starter template based on this prompt orchestration architecture
 
 ---
 
@@ -668,7 +676,7 @@ MIT
 
 ## Author
 
-Built by [Eira](https://github.com/fysd032) — 10 years in financial sales, now building AI products.
+Built by [Eira](https://github.com/eiragu) — 10 years in financial sales, now building AI products.
 
 If you found this useful, a star would be appreciated!
 
@@ -678,27 +686,31 @@ If you found this useful, a star would be appreciated!
 
 # 中文版本
 
-## Promptos 架构设计文档
+## Promptos 架构设计文档 — 多引擎 AI Prompt 编排系统
 
-> 我如何构建一个支持 80+ 内容生成模块的多引擎 AI Prompt 系统 — 从零到生产环境的完整记录。
+> 我如何构建一个支持 80+ 内容生成模块的多引擎 AI Prompt 编排系统 — 从零到生产环境的完整架构记录。
 
 ### 这个仓库包含什么
 
-这不是一个可运行的项目，而是一份**架构设计文档**，记录了我在构建 [FuYouAI](https://fuyouai.com) 过程中的技术决策和经验教训。
+这是一份**生产级 AI Prompt 编排架构设计文档**，记录了我在构建 [FuYouAI](https://fuyouai.com)（AI 内容生成平台）过程中的技术决策和经验教训。适用于需要管理多个大模型（LLM）、多 Prompt 模板、多引擎的 AI 应用场景。
 
 ### 核心内容
 
-1. **多引擎架构** — 如何设计支持多个 LLM 提供商的系统
-2. **5 大核心引擎** — 任务拆解、CoT 推理、内容生成、分析引擎、任务树
-3. **模块系统** — 如何组织和管理 80+ 个 Prompt 模块
-4. **Prompt 解析策略** — 灵活的 key 解析机制，支持多种命名约定
-5. **生产环境实践** — 错误处理、验证、功能开关、可观测性
+1. **多大模型（LLM）接入架构** — 如何设计支持 DeepSeek、Gemini、Claude 等多个 AI 大模型的可插拔系统
+2. **5 大核心 AI 引擎** — 任务拆解引擎、CoT 链式推理引擎、内容生成引擎、数据分析引擎、任务树引擎
+3. **Prompt 模块管理系统** — 如何组织和管理 80+ 个 Prompt 模板模块，支持自动代码生成
+4. **Prompt 解析与路由策略** — 灵活的 key 解析机制，支持多种命名约定和降级策略
+5. **生产环境最佳实践** — 错误处理、启动校验、功能开关、请求追踪、安全认证
 
 ### 适合谁看
 
-- 正在构建 AI 应用的开发者
-- 需要设计 Prompt 管理系统的团队
-- 对生产环境 AI 架构感兴趣的任何人
+- 正在构建 AI 应用、需要 Prompt 管理框架的开发者
+- 需要设计多模型 Prompt 编排系统的技术团队
+- 对生产环境 AI 架构和大规模 Prompt 工程感兴趣的任何人
+
+### 关键词
+
+`Prompt 编排` `多大模型管理` `AI 内容生成` `LLM 架构` `Prompt 工程` `AI 应用开发` `大模型切换` `Prompt 模板管理`
 
 详细内容请参考上方英文文档，包含完整的架构图、代码示例和经验总结。
 
