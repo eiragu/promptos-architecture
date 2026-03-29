@@ -712,7 +712,647 @@ If you found this useful, a star would be appreciated!
 
 `Prompt 编排` `多大模型管理` `AI 内容生成` `LLM 架构` `Prompt 工程` `AI 应用开发` `大模型切换` `Prompt 模板管理`
 
-详细内容请参考上方英文文档，包含完整的架构图、代码示例和经验总结。
+---
+
+### 目录
+
+1. [系统架构](#1-系统架构)
+2. [LLM 大模型接入层](#2-llm-大模型接入层)
+3. [5 大核心引擎](#3-五大核心引擎)
+4. [模块系统设计](#4-模块系统设计)
+5. [Prompt 解析策略](#5-prompt-解析策略)
+6. [API 接口层设计](#6-api-接口层设计)
+7. [生产环境实践](#7-生产环境实践)
+8. [代码示例](#8-代码示例)
+9. [经验总结](#9-经验总结)
+
+---
+
+### 1. 系统架构
+
+#### 整体架构概览
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      客户端请求                               │
+│              POST /api/core/run  或  /api/run                │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+                           ▼
+                ┌─────────────────────┐
+                │   API 接口层         │
+                │   - 身份认证 (API Key)│
+                │   - 错误处理         │
+                │   - 请求追踪         │
+                └─────────┬───────────┘
+                          │
+                          ▼
+              ┌───────────────────────┐
+              │   启动校验 & 配置验证   │
+              │   - 配置项检查         │
+              │   - Prompt 库校验      │
+              └─────────┬─────────────┘
+                        │
+                        ▼
+            ┌─────────────────────────┐
+            │   Prompt 解析层          │
+            │   - 模块 ID → Key 映射   │
+            │   - 多命名约定支持       │
+            │   - 降级候选策略         │
+            └─────────┬───────────────┘
+                      │
+                      ▼
+          ┌───────────────────────────┐
+          │   Prompt 构建器            │
+          │   - 模板 + 用户输入        │
+          │   - 最终 Prompt 组装       │
+          └─────────┬─────────────────┘
+                    │
+                    ▼
+        ┌─────────────────────────────┐
+        │   大模型（LLM）接入层        │
+        │   ┌──────────┐ ┌─────────┐  │
+        │   │ DeepSeek  │ │ Gemini  │  │
+        │   └──────────┘ └─────────┘  │
+        │   （可插拔架构，易于扩展）     │
+        └─────────┬───────────────────┘
+                  │
+                  ▼
+      ┌───────────────────────────────┐
+      │   结构化响应                    │
+      │   - output / text / content   │
+      │   - 元数据 & 请求追踪          │
+      └───────────────────────────────┘
+```
+
+#### 核心设计原则
+
+1. **职责分离** — 每一层只负责一件事
+2. **模型无关** — 大模型提供商可插拔，不硬编码
+3. **快速失败** — 启动时就检测配置错误，不留到生产环境
+4. **优雅降级** — 功能开关控制引擎的开启和关闭
+
+---
+
+### 2. LLM 大模型接入层
+
+LLM 接入层将不同大模型厂商的 API 抽象成统一接口。
+
+#### 架构图
+
+```
+┌─────────────────────────────────┐
+│         runLLM(input)           │  ← 统一接口
+├─────────────────────────────────┤
+│  engineType: "deepseek"|"gemini"│
+│  prompt: string                 │
+│  temperature?: number           │
+└──────────┬──────────────────────┘
+           │
+     ┌─────┴──────┐
+     ▼            ▼
+┌─────────┐  ┌─────────┐
+│DeepSeek │  │ Gemini  │
+│(OpenAI  │  │(Google  │
+│ 兼容)    │  │ GenAI)  │
+└─────────┘  └─────────┘
+```
+
+#### 为什么这样设计？
+
+| 设计决策 | 原因 |
+|----------|------|
+| 单一 `runLLM()` 函数 | 调用方无需知道使用的是哪个大模型 |
+| `ok` 标志的结果类型 | 预期错误（如缺少 API Key）不抛异常 |
+| DeepSeek 使用 OpenAI 兼容 SDK | 很多厂商支持 OpenAI 格式，便于扩展 |
+| 环境变量配置 | API Key 不入代码，方便轮换 |
+
+#### 代码模式
+
+```typescript
+// 统一的输入/输出类型
+type RunLLMInput = {
+  engineType: "deepseek" | "gemini";
+  prompt: string;
+  temperature?: number;
+};
+
+type RunLLMOutput =
+  | { ok: true; engineType: string; text: string }
+  | { ok: false; engineType: string; error: string };
+
+// 使用示例 — 调用方不关心底层是哪个模型
+const result = await runLLM({
+  engineType: "deepseek",
+  prompt: finalPrompt,
+  temperature: 0.7,
+});
+
+if (!result.ok) {
+  // 处理错误
+}
+```
+
+#### 添加新的大模型提供商
+
+要接入一个新的 LLM（如 Claude、GPT-4），只需要：
+
+1. 在 `runLLM()` 中添加一个新的分支
+2. 在联合类型中添加新的引擎类型
+3. 在环境变量中设置 API Key
+
+**引擎层、API 层或系统其他部分完全不需要改动。**
+
+---
+
+### 3. 五大核心引擎
+
+系统围绕 5 个基础 AI 引擎构建，每个引擎针对特定的推理模式。
+
+#### 引擎概览
+
+```
+┌──────────────────────────────────────────────────────────┐
+│                    5 大核心引擎                            │
+├──────────────┬───────────────────────────────────────────┤
+│              │                                           │
+│  任务拆解     │  将复杂任务拆解为可执行的步骤，               │
+│  引擎        │  包含依赖关系                               │
+│              │                                           │
+├──────────────┼───────────────────────────────────────────┤
+│              │                                           │
+│  CoT 推理    │  链式思维推理，用于复杂分析                   │
+│  引擎        │  和问题求解                                 │
+│              │                                           │
+├──────────────┼───────────────────────────────────────────┤
+│              │                                           │
+│  内容生成     │  结构化内容生成，                            │
+│  引擎        │  支持格式控制和风格一致性                     │
+│              │                                           │
+├──────────────┼───────────────────────────────────────────┤
+│              │                                           │
+│  分析引擎     │  MECE 分析、数据解读                        │
+│              │  和洞察提取                                 │
+│              │                                           │
+├──────────────┼───────────────────────────────────────────┤
+│              │                                           │
+│  任务树       │  层级化任务分解，                            │
+│  引擎        │  输出树形结构                               │
+│              │                                           │
+└──────────────┴───────────────────────────────────────────┘
+```
+
+#### 层级系统
+
+每个引擎支持多个层级，适用于不同场景：
+
+| 层级 | 用途 | 使用场景 |
+|------|------|----------|
+| **Basic（基础）** | 快速、简洁的输出 | 快速任务、实时响应 |
+| **Pro（专业）** | 深度、详细的输出 | 复杂分析、高级功能 |
+
+#### 核心定义模式
+
+```typescript
+// 每个核心引擎采用声明式定义
+type CoreDefinition = {
+  id: CoreKey;
+  label: string;
+  description?: string;
+  prompts: Partial<Record<"basic" | "pro", string>>;  // 层级 → promptKey
+};
+
+// 示例：任务拆解引擎
+const taskBreakdown: CoreDefinition = {
+  id: "task_breakdown",
+  label: "Task Breakdown",
+  prompts: {
+    basic: "core.task_breakdown_engine.basic",
+    pro: "core.task_breakdown_engine.pro",
+  },
+};
+```
+
+#### 为什么是 5 个引擎？
+
+这 5 个引擎覆盖了 AI 辅助工作的基本模式：
+
+| 模式 | 引擎 | 实际案例 |
+|------|------|----------|
+| **分解** | 任务拆解 | "策划一次产品发布" → 12 个可执行步骤 |
+| **推理** | CoT 推理 | "我们是否应该进入 X 市场？" → 结构化分析 |
+| **创作** | 内容生成 | "写一篇关于 Y 的博客" → 格式化内容 |
+| **分析** | 分析引擎 | "分析这些销售数据" → 洞察 + 图表 |
+| **结构化** | 任务树 | "梳理整个项目" → 层级树形图 |
+
+这 5 个引擎组合在一起，构成了一个**完整的认知工具集**，可以组合使用以完成复杂工作流。
+
+---
+
+### 4. 模块系统设计
+
+#### 挑战
+
+如何管理 80+ 个不同的 Prompt 模块（写作、分析、营销、编程等）而不陷入混乱？
+
+#### 解决方案：层级化模块组织
+
+```
+模块系统
+├── A 系列 — 内容创作
+│   ├── A1-01  写作大师
+│   ├── A1-02  邮件专家
+│   ├── A1-03  标题生成器
+│   └── ...
+├── B 系列 — 内容转换
+│   ├── B1-01  改写器
+│   ├── B2-01  扩展器
+│   └── ...
+├── C 系列 — 分析与推理
+│   ├── C1-01  CoT 深度分析
+│   ├── C2-01  决策矩阵
+│   └── ...
+├── D 系列 — 研究与提取
+│   ├── D1-01  会议摘要
+│   ├── D2-01  访谈生成器
+│   └── ...
+└── E 系列 — 高级与工作流
+    ├── E1-01  工作流设计器
+    ├── E2-01  角色扮演代理
+    └── ...
+```
+
+#### 模块 ID 映射
+
+系统支持多种方式引用同一个模块：
+
+```
+前端 ID:     "writing_master"     （人类可读）
+       ↓
+模块 ID:     "m1"                 （内部简称）
+       ↓
+Prompt Key:  "A1-01"              （模板引用）
+       ↓
+模板:         完整的 Prompt 文本    （实际内容）
+```
+
+#### 为什么这样设计？
+
+| 问题 | 解决方案 |
+|------|----------|
+| 前端使用可读名称 | `frontendModuleIdMap` 转换为内部 ID |
+| 后端需要稳定的 key | Prompt Key（A1-01）永不改变 |
+| 模块会持续增长 | 系列化分组天然可扩展 |
+| 存在多种命名约定 | 解析层尝试所有候选项 |
+
+#### 31 个生产模块
+
+| # | 模块 | 分类 |
+|---|------|------|
+| m1 | 写作大师 | 内容创作 |
+| m2 | 深度分析 | 分析 |
+| m3 | 研究员 | 研究 |
+| m4 | 市场洞察 | 商业 |
+| m5 | 论文阅读器 | 学术 |
+| m6 | 学术研究 | 学术 |
+| m7 | 数据解读 | 分析 |
+| m8 | 访谈生成器 | 研究 |
+| m9 | 摘要器 | 转换 |
+| m10 | 决策者 | 分析 |
+| m11 | PPT 架构师 | 内容创作 |
+| m12 | 邮件专家 | 内容创作 |
+| m13 | 文案撰写 | 营销 |
+| m14 | 商业计划书 | 商业 |
+| m15 | 产品规格 | 产品 |
+| m16 | 课程设计 | 教育 |
+| m17 | 讲解器 | 教育 |
+| m18 | 角色扮演 | 创意 |
+| m19 | 故事家 | 创意 |
+| m20 | 改写器 | 转换 |
+| m21 | SOP 引擎 | 工作流 |
+| m22 | 项目管理/OKR | 管理 |
+| m23 | 商业模式 | 商业 |
+| m24 | 技术栈 | 工程 |
+| m25 | 调试器 | 工程 |
+| m26 | 元提示 | AI/Prompt |
+| m27 | 多智能体 | AI/Agent |
+| m28 | 无代码自动化 | 自动化 |
+| m29 | 风险管控 | 安全 |
+| m30 | 知识库 | 知识 |
+| m31 | 智能编辑器 | 编辑 |
+
+---
+
+### 5. Prompt 解析策略
+
+#### 问题
+
+在不断增长的系统中，同一个模块可能有多种引用方式：
+- `task_breakdown`（核心 key）
+- `task_breakdown_engine`（引擎名称）
+- `core.task_breakdown_engine.basic`（完全限定名）
+- `task_breakdown/basic`（目录风格）
+
+#### 解决方案：基于候选项的解析
+
+```
+输入: coreKey="task_breakdown", tier="basic"
+                    │
+                    ▼
+        生成候选项:
+        ┌─────────────────────────────────────┐
+        │ 1. task_breakdown.basic             │
+        │ 2. core.task_breakdown.basic        │
+        │ 3. task_breakdown_engine.basic      │
+        │ 4. core.task_breakdown_engine.basic │ ← 匹配!
+        │ 5. task_breakdown/basic             │
+        │ 6. core/task_breakdown/basic        │
+        │ ...                                 │
+        └─────────────────────────────────────┘
+                    │
+                    ▼
+        在 PROMPT_BANK 中找到 → 返回 promptKey
+```
+
+#### 关键设计决策
+
+| 决策 | 原因 |
+|------|------|
+| 尝试多个候选项 | 支持旧命名 + 新命名，无需迁移 |
+| 失败时返回 `tried` 数组 | 便于调试（"我尝试了这 12 个 key，都没匹配"） |
+| 候选项去重 | 性能优化 — 不重复检查同一个 key |
+| 失败时给出详细错误 | 开发者能精确知道哪里出了问题 |
+
+#### 代码模式
+
+```typescript
+function resolveCorePromptKey(coreKey: string, tier: string) {
+  const candidates = [
+    `${coreKey}.${tier}`,
+    `core.${coreKey}.${tier}`,
+    `${coreKey}_engine.${tier}`,
+    `core.${coreKey}_engine.${tier}`,
+    // ... 更多模式
+  ];
+
+  const tried = [];
+  for (const k of new Set(candidates)) {
+    tried.push(k);
+    if (promptBankHasKey(k)) {
+      return { ok: true, promptKey: k, tried };
+    }
+  }
+
+  return { ok: false, error: `未找到。已尝试: ${tried.join(", ")}`, tried };
+}
+```
+
+---
+
+### 6. API 接口层设计
+
+#### 接口结构
+
+```
+/api/
+├── core/run     POST  — 执行核心引擎（5 引擎 × 2 层级）
+├── run          POST  — 执行任意 Prompt 模块（80+ 模块）
+├── generate     POST  — 简单生成接口
+├── registry     GET   — 列出可用模块
+└── ping         GET   — 健康检查
+```
+
+#### 请求流程
+
+```typescript
+// POST /api/core/run
+{
+  "coreKey": "task_breakdown",    // 选择引擎
+  "tier": "basic",                // 选择层级
+  "userInput": "策划一个网站",     // 用户输入
+  "engineType": "deepseek"        // 选择大模型
+}
+
+// 响应
+{
+  "ok": true,
+  "output": "1. 明确需求...",
+  "text": "1. 明确需求...",         // 别名
+  "content": "1. 明确需求...",      // 别名
+  "modelOutput": "1. 明确需求...",  // 别名
+  "meta": {
+    "requestId": "uuid-...",
+    "coreKey": "task_breakdown",
+    "tier": "basic",
+    "engineType": "deepseek",
+    "promptKey": "core.task_breakdown_engine.basic"
+  }
+}
+```
+
+#### 为什么有多个输出别名？
+
+```
+output, text, content, modelOutput — 都包含相同的值
+```
+
+这是有意为之的**向后兼容**设计。不同版本的前端期望不同的字段名。与其破坏旧客户端，不如返回所有别名。成本：约为 0（只是字符串引用）。收益：零前端破坏。
+
+---
+
+### 7. 生产环境实践
+
+#### 7.1 功能开关
+
+```typescript
+// 基于环境变量的功能开关，支持灵活解析
+function envOn(name: string): boolean {
+  const v = String(process.env[name] ?? "").toLowerCase().trim();
+  return ["1", "true", "on", "yes"].includes(v);
+}
+
+// 使用示例：逐步发布新引擎版本
+if (envOn("ENGINE_PROVIDER_V2")) {
+  return runPromptModuleV2(key, input, engine);
+}
+return runPromptModuleLegacy(key, input, engine);
+```
+
+#### 7.2 启动校验
+
+```
+服务器启动
+     │
+     ▼
+bootstrapCore()
+     │
+     ├─ 检查 CORE_ENGINE_NAME 是有效对象
+     ├─ 检查 PROMPT_BANK 已加载且非空
+     ├─ 验证核心定义与 Prompt 库匹配
+     │
+     ├─ 全部通过 → 继续（只运行一次，结果缓存）
+     └─ 错误 → 立即抛出（快速失败）
+```
+
+#### 7.3 错误分类
+
+```typescript
+// 对错误进行分类，便于精准排查
+const code =
+  /api key|unauthorized/i.test(msg) ? "UPSTREAM_AUTH" :
+  /timeout/i.test(msg)              ? "UPSTREAM_TIMEOUT" :
+  /ECONNREFUSED|network/i.test(msg) ? "UPSTREAM_NETWORK" :
+  /json/i.test(msg)                 ? "JSON_PARSE" :
+  "INTERNAL";
+
+// 每个错误码对应人类可读的提示
+// "UPSTREAM_AUTH" → "请检查模型 API Key / BaseURL"
+// "UPSTREAM_TIMEOUT" → "请检查网络或增加超时时间"
+```
+
+#### 7.4 请求追踪
+
+每个请求都会分配一个唯一的 `requestId`，贯穿所有层级：
+
+```
+客户端 → API (requestId=abc) → 引擎 (requestId=abc) → LLM → 响应 (requestId=abc)
+```
+
+排查生产问题时，按 `requestId` 搜索日志即可。
+
+#### 7.5 时序安全认证
+
+```typescript
+// 防止 API Key 比对的时序攻击
+import { timingSafeEqual } from "crypto";
+
+const a = Buffer.from(token, "utf-8");
+const b = Buffer.from(expected, "utf-8");
+if (a.length !== b.length) return false;
+return timingSafeEqual(a, b);
+```
+
+---
+
+### 8. 代码示例
+
+#### 示例 1：添加新的核心引擎
+
+```typescript
+// 1. 添加到 core-map.ts
+export const CORE_ENGINE_NAME = {
+  // ... 已有引擎
+  translation: "translation_engine",  // 新引擎！
+};
+
+// 2. 添加定义
+export const CORE_DEFINITIONS = {
+  // ... 已有
+  translation: {
+    id: "translation",
+    label: "Translation",
+    prompts: {
+      basic: "core.translation_engine.basic",
+      pro: "core.translation_engine.pro",
+    },
+  },
+};
+
+// 3. 在 Prompt 库中添加模板
+// 4. 完成 — 解析、执行、API 全部自动生效
+```
+
+#### 示例 2：接入新的大模型
+
+```typescript
+// 在 provider.ts 中 — 添加一个分支
+if (engineType === "claude") {
+  const apiKey = process.env.CLAUDE_API_KEY;
+  if (!apiKey) return { ok: false, engineType, error: "缺少 CLAUDE_API_KEY" };
+
+  const client = new Anthropic({ apiKey });
+  const message = await client.messages.create({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 4096,
+    messages: [{ role: "user", content: prompt }],
+  });
+
+  return { ok: true, engineType, text: message.content[0].text };
+}
+```
+
+#### 示例 3：添加新模块
+
+```typescript
+// 1. 在 /public/modules/ 创建模块定义 JSON
+// 2. 添加到 moduleOrder.ts
+{ m: "m32", frontModuleId: "translator", labelCN: "翻译", labelEN: "Translator" }
+
+// 3. 运行代码生成
+npm run gen:mmap
+npm run gen:prompt-bank
+
+// 4. 模块现已通过 API 可用
+```
+
+---
+
+### 9. 经验总结
+
+#### 做对了什么
+
+| 决策 | 效果 |
+|------|------|
+| 统一的 LLM 接口 | 10 分钟内从 DeepSeek 切换到 Gemini |
+| 从源文件自动生成代码 | 单一真相来源，无漂移 |
+| 基于候选项的解析 | 重命名时零迁移成本 |
+| 引擎版本的功能开关 | 安全地发布 V2 引擎 |
+| 多输出别名 | 重构期间零前端破坏 |
+
+#### 如果重来会怎么做
+
+| 方面 | 现状 | 更好的方案 |
+|------|------|-----------|
+| Prompt 存储 | 生成的 TypeScript 文件 | 数据库或 CMS，支持热更新 |
+| 模块配置 | `/public` 中的 JSON 文件 | API 驱动的模块注册中心 |
+| 错误处理 | 字符串模式匹配 | 类型化的错误类 |
+| 测试 | 通过测试页手动测试 | 自动化的 Prompt 回归测试 |
+
+#### 核心收获
+
+1. **先写 Prompt，再写代码** — Prompt 模板才是你的产品，代码只是管道。
+2. **从第一天就支持多模型** — 大模型锁定是真实存在的，抽象的成本很低。
+3. **尽早投资解析/映射层** — 命名约定一定会变，提前构建灵活性。
+4. **自动生成，不要手动维护** — 80 个模块 × 手动更新 = 必然漂移。
+5. **功能开关拯救部署** — 回滚一个开关比回滚代码快得多。
+
+---
+
+### 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| 框架 | Next.js 16 (App Router) |
+| 语言 | TypeScript 5 |
+| 大模型 SDK | OpenAI SDK (DeepSeek)、Google GenAI (Gemini) |
+| 部署 | Vercel |
+| 限流 | Upstash Redis |
+| 样式 | Tailwind CSS 4 |
+
+---
+
+### 相关链接
+
+- [FuYouAI](https://fuyouai.com) — 基于此架构的生产级 AI 内容生成平台
+- [promptos-starter](https://github.com/eiragu/promptos-starter) — 基于此 Prompt 编排架构的入门模板
+
+---
+
+### 作者
+
+由 [Eira](https://github.com/eiragu) 构建 — 10 年金融销售经验，现在构建 AI 产品。
+
+如果觉得有用，欢迎给个 Star！
 
 ---
 
